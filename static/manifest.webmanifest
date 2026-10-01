@@ -1,0 +1,9 @@
+{
+  "name": "Opus 5.5 × ElevenLabs Voice",
+  "short_name": "Opus Voice",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0d10",
+  "theme_color": "#0b0d10"
+}
