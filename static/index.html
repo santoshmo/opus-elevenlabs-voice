@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0d10">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<title>Opus Voice</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:#0b0d10;color:#f7f7f8;min-height:100dvh}
+main{max-width:780px;margin:auto;padding:max(18px,env(safe-area-inset-top)) 16px max(24px,env(safe-area-inset-bottom))}
+h1{font-size:22px;margin:0 0 4px}.sub{color:#9da3ae;font-size:13px;margin-bottom:16px}
+.panel{background:#15181d;border:1px solid #272c34;border-radius:16px;padding:14px;margin-bottom:12px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}select,input,button{font:inherit}
+select,input{background:#0e1115;color:#fff;border:1px solid #303640;border-radius:10px;padding:10px}
+select{flex:1;min-width:180px}button{border:0;border-radius:11px;padding:11px 14px;background:#f1f3f5;color:#111;font-weight:650;cursor:pointer}
+button.secondary{background:#252a32;color:#fff}button:disabled{opacity:.45}
+.statuses{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.pill{font-size:12px;padding:6px 9px;border-radius:999px;background:#222832;color:#c8ced7}.pill.ok{background:#173522;color:#9ee6b3}.pill.err{background:#421d22;color:#ffb4bb}
+#chat{display:flex;flex-direction:column;gap:12px;min-height:160px;margin:12px 0}.msg{padding:12px 14px;border-radius:16px;max-width:92%;line-height:1.45}.user{align-self:flex-end;background:#2b5cff}.assistant{align-self:flex-start;background:#1a1e24;border:1px solid #282e37}
+.meta{font-size:11px;color:#9da3ae;margin-top:8px;display:flex;gap:7px;align-items:center}.wave{letter-spacing:1px}
+.composer{position:sticky;bottom:0;background:linear-gradient(transparent,#0b0d10 18%);padding-top:18px}.composer .row{background:#15181d;border:1px solid #272c34;border-radius:16px;padding:8px}
+#text{flex:1;min-width:0;border:0;background:transparent;outline:none}.warn{display:none;margin-top:10px;padding:10px;border-radius:10px;background:#442f16;color:#ffd48b;font-size:12px}
+small{color:#8f96a2}
+</style>
+</head>
+<body><main>
+<h1>Opus 5.5 × ElevenLabs</h1><div class="sub">Mobile realtime voice assistant</div>
+<div class="panel">
+  <div class="row">
+    <select id="voice"><option>Loading voices…</option></select>
+    <select id="effort"><option value="low">Low effort</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">X-high</option></select>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button id="start">Start conversation</button>
+    <button id="speaker" class="secondary">Test speaker</button>
+    <button id="clear" class="secondary">Clear</button>
+  </div>
+  <div class="statuses"><span id="net" class="pill">○ Disconnected</span><span id="mic" class="pill">○ Mic idle</span><span id="aud" class="pill">○ Audio idle</span></div>
+  <div id="resume" class="warn">Mobile browser paused audio. <button id="resumeBtn" style="margin-left:8px;padding:6px 9px">Resume audio</button></div>
+</div>
+<div id="chat"></div>
+<div class="composer"><div class="row"><input id="text" placeholder="Type a message…" autocomplete="off"><button id="send">Send</button></div><small>Keep this page in the foreground for continuous microphone access on mobile.</small></div>
+</main>
+<audio id="player" playsinline></audio>
+<script>
+const $=id=>document.getElementById(id), voice=$("voice"), effort=$("effort"), start=$("start"), speaker=$("speaker"), clear=$("clear"), chat=$("chat"), text=$("text"), send=$("send"), player=$("player");
+let ws=null,stream=null,ctx=null,src=null,proc=null,keep=null,currentTurn=null,audioState=new Map(),partialEl=null;
+function pill(el,label,kind=""){el.textContent=label;el.className="pill "+kind}
+function b64(bytes){let s="",u=new Uint8Array(bytes);for(let i=0;i<u.length;i+=0x8000)s+=String.fromCharCode(...u.subarray(i,i+0x8000));return btoa(s)}
+function resample(input,from,to=16000){if(from===to)return input;let ratio=from/to,n=Math.round(input.length/ratio),out=new Float32Array(n);for(let i=0;i<n;i++){let p=i*ratio,j=Math.floor(p),f=p-j;out[i]=(input[j]||0)*(1-f)+(input[Math.min(j+1,input.length-1)]||0)*f}return out}
+function pcm16(f){let a=new Int16Array(f.length);for(let i=0;i<f.length;i++){let x=Math.max(-1,Math.min(1,f[i]));a[i]=x<0?x*32768:x*32767}return a.buffer}
+function addMsg(role,t="",tid=null){let d=document.createElement("div");d.className="msg "+role;d.dataset.turn=tid||"";let body=document.createElement("div");body.className="body";body.textContent=t;d.append(body);if(role==="assistant"){let m=document.createElement("div");m.className="meta";m.innerHTML="<span class='state'>Preparing voice</span><span class='wave'></span>";d.append(m)}chat.append(d);scrollTo(0,document.body.scrollHeight);return d}
+function msg(tid){return chat.querySelector('[data-turn="'+tid+'"]')}
+function audioLabel(tid,label,wave=""){let m=msg(tid);if(!m)return;m.querySelector(".state").textContent=label;m.querySelector(".wave").textContent=wave}
+async function loadVoices(){try{let r=await fetch("/api/voices"),d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);voice.innerHTML="";for(let v of d.voices){let o=new Option(v.name,v.voice_id);if(v.voice_id===d.default_voice_id)o.selected=true;voice.add(o)}if(!voice.value&&voice.options[0])voice.selectedIndex=0}catch(e){voice.innerHTML="<option>Keys not configured</option>";pill($("net"),"○ Server needs keys","err")}}
+function unlockAudio(){return new Promise(async resolve=>{try{let C=window.AudioContext||window.webkitAudioContext,c=new C(),o=c.createOscillator(),g=c.createGain();g.gain.value=.00001;o.connect(g).connect(c.destination);o.start();o.stop(c.currentTime+.02);await c.resume();setTimeout(()=>c.close(),100);pill($("aud"),"● Audio ready","ok");resolve(true)}catch(e){pill($("aud"),"● Audio blocked","err");resolve(false)}})}
+speaker.onclick=async()=>{let C=window.AudioContext||window.webkitAudioContext,c=new C(),o=c.createOscillator(),g=c.createGain();o.frequency.value=660;g.gain.value=.08;o.connect(g).connect(c.destination);o.start();o.stop(c.currentTime+.16);await c.resume();pill($("aud"),"● Speaker test","ok");setTimeout(()=>c.close(),300)};
+function makeAudio(tid){let s={chunks:[],ms:null,sb:null,q:[],appending:false,fallback:false,started:false};audioState.set(tid,s);if(window.MediaSource&&MediaSource.isTypeSupported("audio/mpeg")){try{s.ms=new MediaSource();player.src=URL.createObjectURL(s.ms);s.ms.addEventListener("sourceopen",()=>{try{s.sb=s.ms.addSourceBuffer("audio/mpeg");s.sb.mode="sequence";s.sb.addEventListener("updateend",()=>pump(tid));pump(tid)}catch(e){s.fallback=true}})}catch(e){s.fallback=true}}else s.fallback=true;return s}
+function pump(tid){let s=audioState.get(tid);if(!s||s.fallback||!s.sb||s.sb.updating)return;if(s.q.length){try{s.sb.appendBuffer(s.q.shift())}catch(e){s.fallback=true}}}
+function bytesFrom64(x){let s=atob(x),u=new Uint8Array(s.length);for(let i=0;i<s.length;i++)u[i]=s.charCodeAt(i);return u}
+async function audioChunk(tid,x){let s=audioState.get(tid)||makeAudio(tid),u=bytesFrom64(x);s.chunks.push(u);if(!s.fallback){s.q.push(u);pump(tid);if(!s.started){try{await player.play();s.started=true;audioLabel(tid,"Speaking","▂▅▃▇");pill($("aud"),"● Speaking","ok")}catch(e){if(e.name==="NotAllowedError"){$("resume").style.display="block";pill($("aud"),"● Tap Resume audio","err")}else s.fallback=true}}}}
+async function finishAudio(tid){let s=audioState.get(tid);if(!s)return;if(!s.fallback&&s.ms&&s.ms.readyState==="open"){let done=()=>{if(!s.sb?.updating&&!s.q.length){withTry(()=>s.ms.endOfStream())}else setTimeout(done,60)};done();if(s.started){audioLabel(tid,"Speech finished");return}}let blob=new Blob(s.chunks,{type:"audio/mpeg"});player.src=URL.createObjectURL(blob);try{await player.play();s.started=true;audioLabel(tid,"Speaking","▂▅▃▇");pill($("aud"),"● Speaking","ok")}catch(e){audioLabel(tid,"Playback blocked");$("resume").style.display="block";pill($("aud"),"● Tap Resume audio","err")}}
+function withTry(fn){try{fn()}catch(e){}}
+player.onended=()=>{pill($("aud"),"● Audio ready","ok");if(currentTurn)audioLabel(currentTurn,"Speech finished")};
+$("resumeBtn").onclick=async()=>{try{await player.play();$("resume").style.display="none";pill($("aud"),"● Speaking","ok")}catch(e){pill($("aud"),"● Audio still blocked","err")}};
+async function beginMic(){stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});let C=window.AudioContext||window.webkitAudioContext;ctx=new C();await ctx.resume();src=ctx.createMediaStreamSource(stream);proc=ctx.createScriptProcessor(4096,1,1);proc.onaudioprocess=e=>{if(!ws||ws.readyState!==1)return;let f=resample(e.inputBuffer.getChannelData(0),ctx.sampleRate,16000);ws.send(JSON.stringify({type:"audio",audio:b64(pcm16(f))}))};src.connect(proc);proc.connect(ctx.destination);pill($("mic"),"● Mic live","ok")}
+async function stopMic(){if(proc){proc.disconnect();proc=null}if(src){src.disconnect();src=null}if(ctx){await ctx.close();ctx=null}if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}pill($("mic"),"○ Mic idle")}
+async function connect(){await unlockAudio();let vid=voice.value;if(!vid||vid.includes("configured"))return;let proto=location.protocol==="https:"?"wss":"ws";ws=new WebSocket(proto+"://"+location.host+"/ws?voice_id="+encodeURIComponent(vid)+"&effort="+encodeURIComponent(effort.value));start.disabled=true;ws.onopen=async()=>{pill($("net"),"● Connected","ok");start.textContent="Stop";start.disabled=false;await beginMic();keep=setInterval(()=>ws?.readyState===1&&ws.send(JSON.stringify({type:"ping"})),20000)};ws.onmessage=async ev=>{let m=JSON.parse(ev.data);if(m.type==="ready")pill($("net"),"● Ready","ok");else if(m.type==="user_partial"){if(!partialEl)partialEl=addMsg("user","");partialEl.querySelector(".body").textContent=m.text}else if(m.type==="user_final"){if(partialEl){partialEl.querySelector(".body").textContent=m.text;partialEl=null}else addMsg("user",m.text)}else if(m.type==="assistant_start"){currentTurn=m.turn_id;addMsg("assistant","",m.turn_id);makeAudio(m.turn_id);audioLabel(m.turn_id,"Preparing voice")}else if(m.type==="assistant_delta"){let el=msg(m.turn_id);if(el)el.querySelector(".body").textContent+=m.text}else if(m.type==="audio_state"){audioLabel(m.turn_id,m.message||m.state);if(m.state==="error")pill($("aud"),"● TTS error","err")}else if(m.type==="audio")await audioChunk(m.turn_id,m.audio);else if(m.type==="assistant_end")await finishAudio(m.turn_id);else if(m.type==="interrupt"){player.pause();player.removeAttribute("src");audioLabel(m.turn_id,"Interrupted");pill($("aud"),"● Audio ready","ok")}else if(m.type==="error"){pill($("net"),"● Error","err");if(m.turn_id)audioLabel(m.turn_id,m.message);else addMsg("assistant","Error: "+m.message)}};ws.onclose=async()=>{clearInterval(keep);keep=null;await stopMic();pill($("net"),"○ Disconnected");start.textContent="Start conversation";start.disabled=false;ws=null}};
+start.onclick=()=>{if(ws)ws.close();else connect()};clear.onclick=()=>{chat.innerHTML="";ws?.send(JSON.stringify({type:"clear"}))};
+function sendText(){let v=text.value.trim();if(!v||!ws||ws.readyState!==1)return;ws.send(JSON.stringify({type:"text",text:v}));text.value=""}send.onclick=sendText;text.addEventListener("keydown",e=>{if(e.key==="Enter")sendText()});
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&ctx?.state==="suspended"){$("resume").style.display="block";pill($("aud"),"● Resume audio","err")}});
+if("serviceWorker"in navigator&&location.protocol==="https:")navigator.serviceWorker.register("/static/sw.js").catch(()=>{});
+loadVoices();
+</script></body></html>
